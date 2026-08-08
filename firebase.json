@@ -1,0 +1,36 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "joldibed",
+          "appId": "1:952659446152:android:8dadbbda6a470a6ec8923d",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "joldibed",
+          "configurations": {
+            "android": "1:952659446152:android:8dadbbda6a470a6ec8923d",
+            "ios": "1:952659446152:ios:f3ad6b8d89d54bcdc8923d",
+            "macos": "1:952659446152:ios:f3ad6b8d89d54bcdc8923d",
+            "web": "1:952659446152:web:a67b4fc6cd173b5cc8923d",
+            "windows": "1:952659446152:web:3df3c4897ddcf812c8923d"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "runtime": "nodejs20"
+    }
+  ]
+}

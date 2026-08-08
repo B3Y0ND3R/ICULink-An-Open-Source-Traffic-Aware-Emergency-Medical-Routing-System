@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "952659446152",
+    "project_id": "joldibed",
+    "storage_bucket": "joldibed.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:952659446152:android:8dadbbda6a470a6ec8923d",
+        "android_client_info": {
+          "package_name": "com.example.joldibed"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC5CbX_oRqioc9lwn1fgETv8iJu6IdW7eg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

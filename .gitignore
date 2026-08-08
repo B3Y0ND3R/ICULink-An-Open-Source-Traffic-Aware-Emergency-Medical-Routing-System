@@ -1,0 +1,71 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Machine-specific (local SDK paths)
+android/local.properties
+
+# Secrets — see lib/config/secrets.example.dart for the template
+lib/config/secrets.dart
+
+# Editor/tooling folders
+.claude/
+.vscode/
+
+# Paper drafts (not part of the app)
+*.tex
+/paper/
+
+# Screenshots and archives (not part of the app)
+/screenshots/
+*.zip
+
+# Built release binaries (too large for git; share separately)
+/releases/
+
+# Build artifacts / heap dumps (android/build is a separate tree from the
+# top-level /build/ already ignored above — Gradle writes reports here)
+/android/build/
+*.hprof
