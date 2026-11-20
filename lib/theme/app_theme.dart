@@ -102,7 +102,7 @@ ThemeData buildAppTheme() {
       style: ElevatedButton.styleFrom(
         backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
-        disabledBackgroundColor: AppColors.accent.withOpacity(0.4),
+        disabledBackgroundColor: AppColors.accent.withValues(alpha: 0.4),
         elevation: 0,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: AppSpacing.lg),

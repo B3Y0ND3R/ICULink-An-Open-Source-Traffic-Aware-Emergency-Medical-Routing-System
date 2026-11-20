@@ -30,6 +30,23 @@ class FirebaseService {
         .recoverWith(() => <HospitalModel>[], logLabel: 'streamAllHospitals');
   }
 
+  /// Real-time stream of the hospitals owned by [uid] (archived ones
+  /// included — the caller splits them). Server-side filtered so staff
+  /// don't download the whole directory.
+  Stream<List<HospitalModel>> streamHospitalsForOwner(String uid) {
+    return _db
+        .collection('hospitals')
+        .where('owner_uids', arrayContains: uid)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map((doc) => HospitalModel.fromFirestore(doc))
+              .toList(),
+        )
+        .recoverWith(() => <HospitalModel>[],
+            logLabel: 'streamHospitalsForOwner');
+  }
+
   /// Fetches all hospitals as a one-time read (used in routing algorithm).
   Future<List<HospitalModel>> fetchAllHospitals() async {
     try {
@@ -76,7 +93,7 @@ class FirebaseService {
     });
   }
 
-  /// Writes a complete hospital document (for seeding initial data).
+  /// Writes a complete hospital document (used by the Add Hospital form).
   Future<void> setHospital(HospitalModel hospital) async {
     await _db
         .collection('hospitals')
@@ -112,24 +129,6 @@ class FirebaseService {
     });
   }
 
-  /// Admin utility: links a hospital-staff account to a hospital. Writes
-  /// both directions of the relationship — the hospital's `owner_uids`
-  /// (used by the update-authorization rule) and the staff member's
-  /// `users/{uid}.hospital_ids` (used by the bookings read-authorization
-  /// rule, kept as a single-document check rather than a cross-document
-  /// lookup). Hospital-to-staff linking is manual for now — run this once
-  /// per staff member after they register.
-  Future<void> assignHospitalOwner(String hospitalId, String uid) async {
-    final batch = _db.batch();
-    batch.update(_db.collection('hospitals').doc(hospitalId), {
-      'owner_uids': FieldValue.arrayUnion([uid]),
-    });
-    batch.update(_db.collection('users').doc(uid), {
-      'hospital_ids': FieldValue.arrayUnion([hospitalId]),
-    });
-    await batch.commit();
-  }
-
   // ─────────────────────────────────────────────
   //  BOOKING OPERATIONS
   // ─────────────────────────────────────────────
@@ -151,13 +150,41 @@ class FirebaseService {
         .where('target_hospital_id', isEqualTo: hospitalId)
         .where('status', isEqualTo: 'EN_ROUTE')
         .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
+        .map((snapshot) {
+          // Ignore bookings that have been "en route" implausibly long —
+          // they're orphans from a driver app that was killed mid-trip and
+          // must not hold a hospital's alarm on forever.
+          final cutoff = DateTime.now().subtract(staleBookingAge);
+          return snapshot.docs
               .map((doc) => BookingModel.fromFirestore(doc))
-              .toList(),
-        )
+              .where((b) => b.createdAt.isAfter(cutoff))
+              .toList();
+        })
         .recoverWith(() => <BookingModel>[],
             logLabel: 'streamActiveBookingsForHospital');
+  }
+
+  /// An EN_ROUTE booking older than this is treated as abandoned.
+  static const Duration staleBookingAge = Duration(hours: 4);
+
+  /// Marks any of this driver's still-EN_ROUTE bookings as CANCELLED.
+  /// Called when the driver app opens: a fresh session has no active trip,
+  /// so anything still EN_ROUTE was orphaned by a crash or force-close.
+  /// (Client-side stand-in for a scheduled cleanup function, which would
+  /// need Firebase's paid plan.)
+  Future<void> cancelOrphanedBookingsForDriver(String driverUid) async {
+    try {
+      final stale = await _db
+          .collection('bookings')
+          .where('driver_uid', isEqualTo: driverUid)
+          .where('status', isEqualTo: 'EN_ROUTE')
+          .get();
+      for (final doc in stale.docs) {
+        await doc.reference.update({'status': 'CANCELLED'});
+      }
+    } catch (e) {
+      debugPrint('cancelOrphanedBookingsForDriver error: $e');
+    }
   }
 
   /// Returns a real-time stream of a driver's booking history (all
@@ -229,102 +256,5 @@ class FirebaseService {
     final doc = await _db.collection('bookings').doc(bookingId).get();
     if (!doc.exists) return null;
     return BookingModel.fromFirestore(doc);
-  }
-
-  // ─────────────────────────────────────────────
-  //  DATA SEEDING (call once on first run)
-  // ─────────────────────────────────────────────
-
-  /// Seeds the Firestore database with a curated list of Dhaka & Chittagong
-  /// hospitals so the app is functional immediately after setup.
-  Future<void> seedInitialHospitals() async {
-    try {
-      final existing = await _db.collection('hospitals').limit(1).get();
-      if (existing.docs.isNotEmpty) return; // already seeded
-
-    final hospitals = [
-      HospitalModel(
-        id: 'dmch_01',
-        name: 'Dhaka Medical College Hospital',
-        lat: 23.7259,
-        lng: 90.3972,
-        vacantIcuBeds: 4,
-        availableVentilators: 3,
-        contact: '+8801700000001',
-      ),
-      HospitalModel(
-        id: 'bsmmu_02',
-        name: 'Bangabandhu Sheikh Mujib Medical University',
-        lat: 23.7340,
-        lng: 90.3966,
-        vacantIcuBeds: 6,
-        availableVentilators: 4,
-        contact: '+8801700000002',
-      ),
-      HospitalModel(
-        id: 'nhf_03',
-        name: 'National Heart Foundation Hospital',
-        lat: 23.7922,
-        lng: 90.3711,
-        vacantIcuBeds: 2,
-        availableVentilators: 1,
-        contact: '+8801700000003',
-      ),
-      HospitalModel(
-        id: 'square_04',
-        name: 'Square Hospital',
-        lat: 23.7518,
-        lng: 90.3746,
-        vacantIcuBeds: 5,
-        availableVentilators: 3,
-        contact: '+8801700000004',
-      ),
-      HospitalModel(
-        id: 'ibn_05',
-        name: 'Ibn Sina Hospital Dhanmondi',
-        lat: 23.7438,
-        lng: 90.3703,
-        vacantIcuBeds: 3,
-        availableVentilators: 2,
-        contact: '+8801700000005',
-      ),
-      HospitalModel(
-        id: 'cmch_06',
-        name: 'Chittagong Medical College Hospital',
-        lat: 22.3569,
-        lng: 91.8317,
-        vacantIcuBeds: 7,
-        availableVentilators: 5,
-        contact: '+8801700000006',
-      ),
-      HospitalModel(
-        id: 'parkview_07',
-        name: 'Parkview Hospital Chittagong',
-        lat: 22.3750,
-        lng: 91.8290,
-        vacantIcuBeds: 3,
-        availableVentilators: 2,
-        contact: '+8801700000007',
-      ),
-      HospitalModel(
-        id: 'popular_08',
-        name: 'Popular Medical Centre Dhaka',
-        lat: 23.7460,
-        lng: 90.3820,
-        vacantIcuBeds: 0,
-        availableVentilators: 0,
-        contact: '+8801700000008',
-      ),
-    ];
-
-      final batch = _db.batch();
-      for (final h in hospitals) {
-        batch.set(_db.collection('hospitals').doc(h.id), h.toFirestore());
-      }
-      await batch.commit();
-      debugPrint('Firestore: Seeded ${hospitals.length} hospitals successfully.');
-    } catch (e) {
-      debugPrint('seedInitialHospitals error (enable Cloud Firestore API): $e');
-    }
   }
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -28,6 +29,7 @@ class NotificationService {
   );
 
   bool _initialized = false;
+  StreamSubscription<String>? _tokenRefreshSub;
 
   /// One-time setup: request permission, create the Android notification
   /// channel, and wire up the foreground message listener. Safe to call
@@ -37,6 +39,10 @@ class NotificationService {
     _initialized = true;
 
     await _messaging.requestPermission(alert: true, badge: true, sound: true);
+
+    // flutter_local_notifications has no web implementation; on web the
+    // browser's own FCM handling is used instead.
+    if (kIsWeb) return;
 
     await _localNotifications
         .resolvePlatformSpecificImplementation<
@@ -89,9 +95,17 @@ class NotificationService {
       debugPrint('registerTokenForCurrentUser error: $e');
     }
 
-    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+    // Replace (not stack) the refresh listener — this method runs every time
+    // the staff dashboard mounts.
+    await _tokenRefreshSub?.cancel();
+    _tokenRefreshSub = _messaging.onTokenRefresh.listen((newToken) async {
       final currentUid = AuthService.instance.currentUser?.uid;
-      if (currentUid != null) _addToken(currentUid, newToken);
+      if (currentUid == null) return;
+      try {
+        await _addToken(currentUid, newToken);
+      } catch (e) {
+        debugPrint('onTokenRefresh error: $e');
+      }
     });
   }
 

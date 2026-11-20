@@ -4,9 +4,10 @@ import '../../services/auth_service.dart';
 import '../../theme/app_theme.dart';
 
 /// One-time profile-completion screen shown to hospital staff right after
-/// their first successful sign-in. Collects a name only — linking the
-/// account to a specific hospital is a manual/admin step for now (see
-/// FirebaseService.assignHospitalOwner), not self-service.
+/// their first successful sign-in. Collects a name only — hospitals are
+/// attached afterwards, either by adding one in the app (the creator becomes
+/// its owner) or by an administrator adding the account to an existing
+/// hospital's owner_uids in the Firebase Console.
 class StaffRegisterScreen extends StatefulWidget {
   const StaffRegisterScreen({super.key});
 
@@ -108,8 +109,8 @@ class _StaffRegisterScreenState extends State<StaffRegisterScreen> {
                     const SizedBox(width: AppSpacing.sm),
                     Expanded(
                       child: Text(
-                        'After you continue, an administrator will link your account '
-                        'to your hospital. If you don\'t see it yet, check back later.',
+                        'After you continue, add your hospital in the app, or ask an '
+                        'administrator to link your account to an existing one.',
                         style: GoogleFonts.inter(
                           color: AppColors.textSecondary,
                           fontSize: 12.5,

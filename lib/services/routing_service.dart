@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../config/secrets.dart';
 import '../models/hospital_model.dart';
@@ -20,41 +21,53 @@ class RoutingResult {
   });
 }
 
-/// Coordinates of a point used in OpenRouteService API calls.
-class _Coordinate {
-  final double lat;
-  final double lng;
-  const _Coordinate(this.lat, this.lng);
-  List<double> toLngLat() => [lng, lat];
+/// One TomTom Matrix API result: a travel duration plus how much of it (if
+/// any) reflects a live-traffic delay rather than a raw free-flow estimate.
+class _MatrixEntry {
+  final double durationMinutes;
+  final int? trafficDelaySeconds;
+  const _MatrixEntry(this.durationMinutes, this.trafficDelaySeconds);
+
+  /// TomTom reports `trafficDelayInSeconds: 0` both when a route genuinely
+  /// has no current congestion *and* when it simply has no live-traffic
+  /// sensor coverage for that road (confirmed directly: a Khulna route came
+  /// back with 0 delay and a 69 km/h implied speed — clearly no real data,
+  /// not an empty road). There's no way to tell those two cases apart from
+  /// the API alone, so treat zero delay as "can't trust this number" rather
+  /// than "confirmed clear road."
+  bool get hasLiveTrafficData => (trafficDelaySeconds ?? 0) > 0;
 }
 
-/// Handles all map and routing operations.
-/// Uses the OpenRouteService Matrix + Directions APIs when reachable,
-/// falling back to a Euclidean estimate at ~20 km/h (Dhaka traffic average).
+/// Handles all map and routing operations, deliberately splitting the work
+/// across two providers by what each is actually good at:
+///
+/// - **TomTom Matrix API** for hospital scoring and the displayed ETA — its
+///   travel times factor in live traffic, unlike a theoretical free-flow
+///   speed.
+/// - **OpenRouteService Directions API** for the actual road-following line
+///   drawn on the map — verified directly against TomTom on a real Khulna
+///   route: TomTom's own road-network data had a gap here and snapped the
+///   route over a kilometer from the real start/end point, while ORS (built
+///   on OpenStreetMap, which has strong community-mapped coverage in
+///   Bangladesh) landed within ~15m of both. ORS has no live traffic data,
+///   but that's fine — its output is only ever used for line geometry, never
+///   for timing.
+///
+/// Falls back to a Haversine (great-circle) estimate at ~20 km/h (Dhaka traffic average)
+/// for duration, and a straight line for geometry, if the respective
+/// provider is unreachable.
 class RoutingService {
   RoutingService._internal();
   static final RoutingService instance = RoutingService._internal();
 
-  // ─── OpenRouteService API key (openrouteservice.org) ───
   // Loaded from lib/config/secrets.dart, which is gitignored — see
   // lib/config/secrets.example.dart for the template.
+  static const String _tomtomApiKey = Secrets.tomtomApiKey;
   static const String _orsApiKey = Secrets.orsApiKey;
 
   static const double _fallbackSpeedKmPerMin = 0.333; // ~20 km/h
-
-  /// OpenRouteService's `driving-car` profile has no live traffic data — it
-  /// returns a theoretical free-flow highway duration, which reads as
-  /// wildly optimistic for real Bangladesh road/traffic conditions (verified
-  /// directly against the API: Khulna → Dhaka comes back as ~141 min, versus
-  /// a real-world 5-6 hour drive). This is a rough regional correction
-  /// factor, not a measured constant — there's no live-traffic data source
-  /// behind it, just a fixed slowdown applied to bring the displayed ETA
-  /// closer to reality. Only applied to Matrix-API-derived durations; the
-  /// Haversine fallback below already assumes a deliberately slow 20 km/h.
-  static const double _trafficRealismMultiplier = 1.8;
-  static const String _matrixUrl =
-      'https://api.openrouteservice.org/v2/matrix/driving-car';
-  static const String _directionsUrl =
+  static const String _matrixUrl = 'https://api.tomtom.com/routing/matrix/2';
+  static const String _orsDirectionsUrl =
       'https://api.openrouteservice.org/v2/directions/driving-car/geojson';
 
   // ─────────────────────────────────────────────
@@ -68,7 +81,7 @@ class RoutingService {
   }
 
   // ─────────────────────────────────────────────
-  //  EUCLIDEAN FALLBACK DISTANCE (Haversine)
+  //  GREAT-CIRCLE FALLBACK DISTANCE (Haversine)
   // ─────────────────────────────────────────────
 
   double _haversineDistanceKm(
@@ -107,55 +120,69 @@ class RoutingService {
   }
 
   // ─────────────────────────────────────────────
-  //  OPENROUTESERVICE MATRIX API
+  //  TOMTOM MATRIX ROUTING API
   // ─────────────────────────────────────────────
 
-  /// Queries the OpenRouteService Matrix API.
-  /// Returns a list of durations (in minutes) from the ambulance to each
-  /// hospital in [destinations]. Returns null on any network or API error.
-  Future<List<double>?> _fetchMatrixDurations(
-    _Coordinate ambulance,
-    List<_Coordinate> destinations,
+  /// Queries the TomTom Matrix Routing API (v2) for live, traffic-aware
+  /// travel durations from the ambulance to every hospital in [destinations].
+  /// Returns one entry per destination (ordered to match), or null on any
+  /// network or API error.
+  Future<List<_MatrixEntry>?> _fetchMatrixDurations(
+    List<double> ambulance,
+    List<List<double>> destinations,
   ) async {
     if (destinations.isEmpty) return [];
 
-    final locations = [
-      ambulance.toLngLat(),
-      ...destinations.map((d) => d.toLngLat()),
-    ];
-    final destinationIndices = List.generate(destinations.length, (i) => i + 1);
-
-    final uri = Uri.parse(_matrixUrl);
+    final uri = Uri.parse('$_matrixUrl?key=$_tomtomApiKey');
 
     try {
       final response = await http
           .post(
             uri,
-            headers: {
-              'Authorization': _orsApiKey,
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-            },
+            headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'locations': locations,
-              'sources': [0],
-              'destinations': destinationIndices,
-              'metrics': ['duration'],
+              'origins': [
+                {
+                  'point': {'latitude': ambulance[0], 'longitude': ambulance[1]}
+                }
+              ],
+              'destinations': destinations
+                  .map((d) => {
+                        'point': {'latitude': d[0], 'longitude': d[1]}
+                      })
+                  .toList(),
             }),
           )
           .timeout(const Duration(seconds: 10));
 
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) {
+        debugPrint('TomTom matrix error: ${response.statusCode} ${response.body}');
+        return null;
+      }
 
       final json = jsonDecode(response.body) as Map<String, dynamic>;
-      final durationsRaw = (json['durations'] as List?)?.firstOrNull as List?;
-      if (durationsRaw == null) return null;
+      final data = json['data'] as List?;
+      if (data == null || data.isEmpty) return null;
 
-      // Convert seconds to minutes
-      return durationsRaw
-          .map((v) => ((v as num?)?.toDouble() ?? double.infinity) / 60.0)
+      // Response items carry an explicit destinationIndex rather than
+      // relying on array order — map back into a list keyed by that index
+      // rather than assuming the response preserves request order.
+      final entries = List<_MatrixEntry?>.filled(destinations.length, null);
+      for (final entry in data) {
+        final e = entry as Map<String, dynamic>;
+        final destIndex = e['destinationIndex'] as int?;
+        final summary = e['routeSummary'] as Map<String, dynamic>?;
+        final seconds = (summary?['travelTimeInSeconds'] as num?)?.toDouble();
+        final delaySeconds = (summary?['trafficDelayInSeconds'] as num?)?.toInt();
+        if (destIndex != null && seconds != null && destIndex < entries.length) {
+          entries[destIndex] = _MatrixEntry(seconds / 60.0, delaySeconds);
+        }
+      }
+      return entries
+          .map((e) => e ?? const _MatrixEntry(double.infinity, null))
           .toList();
-    } catch (_) {
+    } catch (e) {
+      debugPrint('TomTom matrix exception: $e');
       return null;
     }
   }
@@ -168,9 +195,10 @@ class RoutingService {
   ///
   /// Steps:
   /// 1. Fetches all hospitals from Firestore.
-  /// 2. Filters out hospitals with 0 ICU beds.
-  /// 3. Queries the OpenRouteService Matrix API for live travel durations.
-  /// 4. Falls back to Haversine estimate if OpenRouteService is unavailable.
+  /// 2. Filters out hospitals with 0 ICU beds (or archived).
+  /// 3. Queries the TomTom Matrix Routing API for live, traffic-aware travel durations.
+  /// 4. Falls back to a Haversine estimate for *all* hospitals if TomTom is
+  ///    unavailable or lacks live-traffic data for any of them.
   /// 5. Scores each hospital and returns the best match.
   Future<RoutingResult?> findOptimalHospital({
     required double ambulanceLat,
@@ -184,36 +212,37 @@ class RoutingService {
 
     if (eligible.isEmpty) return null;
 
-    // Step 3: Attempt OpenRouteService Matrix API
-    final ambulanceCoord = _Coordinate(ambulanceLat, ambulanceLng);
-    final destCoords =
-        eligible.map((h) => _Coordinate(h.lat, h.lng)).toList();
+    // Step 3: Attempt TomTom Matrix Routing API
+    final ambulanceCoord = [ambulanceLat, ambulanceLng];
+    final destCoords = eligible.map((h) => [h.lat, h.lng]).toList();
 
     final matrixDurations =
         await _fetchMatrixDurations(ambulanceCoord, destCoords);
 
-    bool usedFallback = matrixDurations == null;
+    // Every hospital must be scored on the same basis, otherwise a hospital
+    // with a live TomTom estimate gets compared against one with a crude
+    // straight-line guess and the ranking is meaningless. So live data is
+    // used only when it is trustworthy for *all* eligible hospitals;
+    // otherwise every hospital uses the same Haversine estimate.
+    final useLiveData = matrixDurations != null &&
+        matrixDurations.length == eligible.length &&
+        matrixDurations
+            .every((e) => e.durationMinutes.isFinite && e.hasLiveTrafficData);
+    final usedFallback = !useLiveData;
 
     // Step 4 & 5: Score each eligible hospital
     RoutingResult? best;
 
     for (int i = 0; i < eligible.length; i++) {
       final hospital = eligible[i];
-      double durationMinutes;
-
-      if (!usedFallback &&
-          i < matrixDurations!.length &&
-          matrixDurations[i].isFinite) {
-        durationMinutes = matrixDurations[i] * _trafficRealismMultiplier;
-      } else {
-        durationMinutes = _fallbackDurationMinutes(
-          ambulanceLat,
-          ambulanceLng,
-          hospital.lat,
-          hospital.lng,
-        );
-        usedFallback = true;
-      }
+      final durationMinutes = useLiveData
+          ? matrixDurations[i].durationMinutes
+          : _fallbackDurationMinutes(
+              ambulanceLat,
+              ambulanceLng,
+              hospital.lat,
+              hospital.lng,
+            );
 
       final score = _computeScore(durationMinutes, hospital.vacantIcuBeds);
 
@@ -230,9 +259,14 @@ class RoutingService {
     return best;
   }
 
-  /// Fetches a turn-by-turn route geometry (list of lat/lng) between two points
-  /// using the OpenRouteService Directions API. Falls back to a direct line
-  /// on any network or API error.
+  /// Fetches a turn-by-turn route geometry (list of [lat, lng] pairs) between
+  /// two points using the OpenRouteService Directions API (OSM-based road
+  /// data — chosen for geometry specifically because it covers this app's
+  /// target region better than TomTom's commercial map). Purely visual: this
+  /// never feeds into the displayed ETA or hospital scoring, both of which
+  /// stay on TomTom's traffic-aware Matrix API. Falls back to a direct line
+  /// on any network/API error, or if the returned route's endpoints land
+  /// implausibly far from the requested coordinates.
   Future<List<List<double>>> fetchRoutePolyline({
     required double fromLat,
     required double fromLng,
@@ -244,7 +278,7 @@ class RoutingService {
       [toLat, toLng],
     ];
 
-    final uri = Uri.parse(_directionsUrl);
+    final uri = Uri.parse(_orsDirectionsUrl);
 
     try {
       final response = await http
@@ -264,7 +298,10 @@ class RoutingService {
           )
           .timeout(const Duration(seconds: 10));
 
-      if (response.statusCode != 200) return directLine;
+      if (response.statusCode != 200) {
+        debugPrint('ORS routing error: ${response.statusCode} ${response.body}');
+        return directLine;
+      }
 
       final json = jsonDecode(response.body) as Map<String, dynamic>;
       final features = json['features'] as List?;
@@ -272,19 +309,33 @@ class RoutingService {
 
       final geometry =
           (features[0] as Map<String, dynamic>)['geometry'] as Map<String, dynamic>;
-      final coordinates = (geometry['coordinates'] as List)
-          .map((coord) {
-            final c = coord as List;
-            // GeoJSON is [lng, lat]
-            return [
-              (c[1] as num).toDouble(),
-              (c[0] as num).toDouble(),
-            ];
-          })
-          .toList();
+      final coordinates = (geometry['coordinates'] as List).map((coord) {
+        final c = coord as List;
+        // GeoJSON is [lng, lat] — flip to the [lat, lng] pairs CustomMap expects.
+        return [(c[1] as num).toDouble(), (c[0] as num).toDouble()];
+      }).toList();
+
+      if (coordinates.length < 2) return directLine;
+
+      // Sanity check kept as cheap insurance regardless of provider — if a
+      // route's endpoints don't land near where we asked, a misleading path
+      // is worse than a plain straight line.
+      const maxSnapDistanceKm = 1.0;
+      final startDrift =
+          _haversineDistanceKm(fromLat, fromLng, coordinates.first[0], coordinates.first[1]);
+      final endDrift =
+          _haversineDistanceKm(toLat, toLng, coordinates.last[0], coordinates.last[1]);
+      if (startDrift > maxSnapDistanceKm || endDrift > maxSnapDistanceKm) {
+        debugPrint(
+          'ORS route endpoints too far from requested points '
+          '(start drift ${startDrift.toStringAsFixed(2)}km, end drift ${endDrift.toStringAsFixed(2)}km) — using direct line',
+        );
+        return directLine;
+      }
 
       return coordinates;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('ORS routing exception: $e');
       return directLine;
     }
   }

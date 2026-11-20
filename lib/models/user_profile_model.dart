@@ -36,7 +36,6 @@ class UserProfileModel {
   final UserRole role;
   final String name;
   final String? vehicleId;
-  final List<String> hospitalIds;
   final String? email;
   final String? phone;
   final List<String> fcmTokens;
@@ -47,7 +46,6 @@ class UserProfileModel {
     required this.role,
     required this.name,
     this.vehicleId,
-    this.hospitalIds = const [],
     this.email,
     this.phone,
     this.fcmTokens = const [],
@@ -67,7 +65,6 @@ class UserProfileModel {
       role: UserRoleExtension.fromString(data['role'] as String? ?? 'DRIVER'),
       name: data['name'] as String? ?? '',
       vehicleId: data['vehicle_id'] as String?,
-      hospitalIds: (data['hospital_ids'] as List?)?.cast<String>() ?? const [],
       email: data['email'] as String?,
       phone: data['phone'] as String?,
       fcmTokens: (data['fcm_tokens'] as List?)?.cast<String>() ?? const [],
@@ -81,7 +78,6 @@ class UserProfileModel {
       'role': role.firestoreValue,
       'name': name,
       'vehicle_id': vehicleId,
-      'hospital_ids': hospitalIds,
       'email': email,
       'phone': phone,
       'fcm_tokens': fcmTokens,
@@ -94,7 +90,6 @@ class UserProfileModel {
     UserRole? role,
     String? name,
     String? vehicleId,
-    List<String>? hospitalIds,
     String? email,
     String? phone,
     List<String>? fcmTokens,
@@ -105,7 +100,6 @@ class UserProfileModel {
       role: role ?? this.role,
       name: name ?? this.name,
       vehicleId: vehicleId ?? this.vehicleId,
-      hospitalIds: hospitalIds ?? this.hospitalIds,
       email: email ?? this.email,
       phone: phone ?? this.phone,
       fcmTokens: fcmTokens ?? this.fcmTokens,

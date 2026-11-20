@@ -144,15 +144,15 @@ Functions for push notifications). Install it now so it's ready.
    ```
    You should see `joldibed` in the list.
 
-**Do not run `firebase deploy` or `firebase init` yet** — that will happen once the security rules files exist in the repo (a later step, not part of this manual setup guide).
+The rules (`firestore.rules`), indexes (`firestore.indexes.json`) and Cloud Function (`functions/`) already exist in the repo — deploy them with `firebase deploy --only firestore:rules,firestore:indexes` (and `--only functions` once on the Blaze plan). **Deploy the updated rules together with this version of the app**: older app builds that relied on `users.hospital_ids` will no longer be able to read bookings.
 
 ---
 
-## 5. (Later — skip for now) Upgrade to the Blaze plan
+## 5. Upgrade to the Blaze plan (needed for push notifications)
 
 This step is **only needed for push notifications** (Cloud Functions require it)
 and is **not needed** for login, hospital management, or the core app to work.
-You'll be told explicitly when it's time for this step — for now, skip it.
+Skip it if you don't need push notifications.
 
 When the time comes:
 1. Firebase Console → gear icon (⚙️) → **Usage and billing**.

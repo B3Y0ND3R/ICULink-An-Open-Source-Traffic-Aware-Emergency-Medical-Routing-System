@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -42,7 +43,8 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
   String _statusMessage = 'Ready to dispatch';
   String _errorMessage = '';
 
-  Timer? _locationTimer;
+  StreamSubscription<Position>? _positionSub;
+  bool _uploadingPosition = false;
 
   final _uuid = const Uuid();
 
@@ -51,10 +53,12 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
   String _ambulanceId = '';
   String _driverUid = '';
 
+  late final Future<void> _profileReady;
+
   @override
   void initState() {
     super.initState();
-    _loadDriverProfile();
+    _profileReady = _loadDriverProfile();
   }
 
   Future<void> _loadDriverProfile() async {
@@ -65,6 +69,11 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
       _driverUid = uid;
       _ambulanceId = profile?.vehicleId ?? uid;
     });
+    // A freshly opened driver screen has no active trip, so close any trip
+    // a previous crashed/killed session left EN_ROUTE.
+    if (uid.isNotEmpty) {
+      await FirebaseService.instance.cancelOrphanedBookingsForDriver(uid);
+    }
   }
 
   Future<void> _confirmSignOut() async {
@@ -101,7 +110,7 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
 
   @override
   void dispose() {
-    _locationTimer?.cancel();
+    _positionSub?.cancel();
     super.dispose();
   }
 
@@ -116,67 +125,81 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
       _errorMessage = '';
     });
 
-    // Step 1: Get current GPS position
-    final position = await _acquireGpsPosition();
-    if (position == null) return;
+    try {
+      // The profile supplies the driver UID / vehicle ID stamped on the
+      // booking — make sure it has finished loading before dispatching.
+      await _profileReady;
+      if (!mounted) return;
+      if (_driverUid.isEmpty) {
+        _setError('Not signed in. Please log in again.');
+        return;
+      }
 
-    setState(() {
-      _currentPosition = position;
-      _appState = _AmbulanceState.routing;
-      _statusMessage = 'Running routing algorithm…';
-    });
+      // Step 1: Get current GPS position
+      final position = await _acquireGpsPosition();
+      if (position == null || !mounted) return;
 
-    // Step 2: Run scoring algorithm
-    final result = await RoutingService.instance.findOptimalHospital(
-      ambulanceLat: position.latitude,
-      ambulanceLng: position.longitude,
-    );
-
-    if (result == null) {
       setState(() {
-        _appState = _AmbulanceState.error;
-        _errorMessage = 'No hospitals with available ICU beds found.';
+        _currentPosition = position;
+        _appState = _AmbulanceState.routing;
+        _statusMessage = 'Running routing algorithm…';
       });
-      return;
+
+      // Step 2: Run scoring algorithm
+      final result = await RoutingService.instance.findOptimalHospital(
+        ambulanceLat: position.latitude,
+        ambulanceLng: position.longitude,
+      );
+      if (!mounted) return;
+
+      if (result == null) {
+        _setError('No hospitals with available ICU beds found.');
+        return;
+      }
+
+      setState(() {
+        _routingResult = result;
+        _statusMessage = 'Fetching route to ${result.hospital.name}…';
+      });
+
+      // Step 3: Fetch polyline route
+      final polyline = await RoutingService.instance.fetchRoutePolyline(
+        fromLat: position.latitude,
+        fromLng: position.longitude,
+        toLat: result.hospital.lat,
+        toLng: result.hospital.lng,
+      );
+      if (!mounted) return;
+
+      // Step 4: Commit booking to Firestore
+      final booking = BookingModel(
+        id: _uuid.v4(),
+        ambulanceId: _ambulanceId,
+        driverUid: _driverUid,
+        currentLat: position.latitude,
+        currentLng: position.longitude,
+        targetHospitalId: result.hospital.id,
+        targetHospitalName: result.hospital.name,
+        status: BookingStatus.enRoute,
+        createdAt: DateTime.now(),
+      );
+
+      await FirebaseService.instance.createBooking(booking);
+      if (!mounted) return;
+
+      // Step 5: Start live location upload
+      _startLocationTracking(booking.id);
+
+      setState(() {
+        _activeBooking = booking;
+        _routePolyline = polyline;
+        _appState = _AmbulanceState.navigating;
+        _statusMessage = 'Navigating to ${result.hospital.name}';
+      });
+    } catch (e) {
+      debugPrint('SOS dispatch failed: $e');
+      _setError('Dispatch failed — check your connection and try again.');
     }
-
-    setState(() {
-      _routingResult = result;
-      _statusMessage = 'Fetching route to ${result.hospital.name}…';
-    });
-
-    // Step 3: Fetch polyline route
-    final polyline = await RoutingService.instance.fetchRoutePolyline(
-      fromLat: position.latitude,
-      fromLng: position.longitude,
-      toLat: result.hospital.lat,
-      toLng: result.hospital.lng,
-    );
-
-    // Step 4: Commit booking to Firestore
-    final booking = BookingModel(
-      id: _uuid.v4(),
-      ambulanceId: _ambulanceId,
-      driverUid: _driverUid,
-      currentLat: position.latitude,
-      currentLng: position.longitude,
-      targetHospitalId: result.hospital.id,
-      targetHospitalName: result.hospital.name,
-      status: BookingStatus.enRoute,
-      createdAt: DateTime.now(),
-    );
-
-    await FirebaseService.instance.createBooking(booking);
-
-    // Step 5: Start live location upload timer
-    _startLocationTimer(booking.id);
-
-    setState(() {
-      _activeBooking = booking;
-      _routePolyline = polyline;
-      _appState = _AmbulanceState.navigating;
-      _statusMessage = 'Navigating to ${result.hospital.name}';
-    });
   }
 
   // ─────────────────────────────────────────────
@@ -209,23 +232,21 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
         desiredAccuracy: LocationAccuracy.high,
       ).timeout(const Duration(seconds: 15));
     } catch (e) {
-      // Fallback to Dhaka center coordinates for demo purposes
-      return Position(
-        latitude: 23.8103,
-        longitude: 90.4125,
-        timestamp: DateTime.now(),
-        accuracy: 10,
-        altitude: 4,
-        heading: 0,
-        speed: 0,
-        speedAccuracy: 0,
-        altitudeAccuracy: 0,
-        headingAccuracy: 0,
-      );
+      // Never invent a position: routing an ambulance from a made-up
+      // location is worse than not routing. A recent real fix is acceptable;
+      // otherwise tell the driver.
+      debugPrint('GPS fix failed: $e');
+      try {
+        final last = await Geolocator.getLastKnownPosition();
+        if (last != null) return last;
+      } catch (_) {}
+      _setError('Could not get a GPS fix. Move to an open area and retry.');
+      return null;
     }
   }
 
   void _setError(String message) {
+    if (!mounted) return;
     setState(() {
       _appState = _AmbulanceState.error;
       _errorMessage = message;
@@ -233,21 +254,35 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
   }
 
   // ─────────────────────────────────────────────
-  //  LIVE LOCATION TIMER – pushes to Firestore every 5s
+  //  LIVE LOCATION TRACKING – pushes to Firestore about every 5s
+  //
+  //  Uses a position stream (with an Android foreground service) rather than
+  //  a Dart timer, so updates keep flowing when the driver switches to a
+  //  navigation/phone app and the hospital keeps seeing the live position.
   // ─────────────────────────────────────────────
 
-  void _startLocationTimer(String bookingId) {
-    _locationTimer?.cancel();
-    _locationTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
-      try {
-        final position = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high,
-        );
-        await FirebaseService.instance.updateBookingCoordinates(
-          bookingId,
-          position.latitude,
-          position.longitude,
-        );
+  LocationSettings _trackingSettings() {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 0,
+        intervalDuration: const Duration(seconds: 5),
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationTitle: 'ICULink dispatch active',
+          notificationText: 'Sharing live location with the receiving hospital',
+          enableWakeLock: true,
+        ),
+      );
+    }
+    return const LocationSettings(accuracy: LocationAccuracy.high);
+  }
+
+  void _startLocationTracking(String bookingId) {
+    _positionSub?.cancel();
+    _positionSub = Geolocator.getPositionStream(
+      locationSettings: _trackingSettings(),
+    ).listen(
+      (position) async {
         if (mounted) {
           setState(() {
             _currentPosition = position;
@@ -257,24 +292,59 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
             );
           });
         }
-      } catch (_) {
-        // Silently skip on position error; do not crash the timer
-      }
-    });
+        // Skip (rather than queue) uploads while one is still in flight.
+        if (_uploadingPosition) return;
+        _uploadingPosition = true;
+        try {
+          await FirebaseService.instance.updateBookingCoordinates(
+            bookingId,
+            position.latitude,
+            position.longitude,
+          );
+        } catch (e) {
+          debugPrint('Location upload failed: $e'); // retry on next fix
+        } finally {
+          _uploadingPosition = false;
+        }
+      },
+      onError: (Object e) => debugPrint('Position stream error: $e'),
+    );
+  }
+
+  void _stopLocationTracking() {
+    _positionSub?.cancel();
+    _positionSub = null;
   }
 
   // ─────────────────────────────────────────────
   //  CANCEL BOOKING
   // ─────────────────────────────────────────────
 
-  Future<void> _cancelBooking() async {
-    _locationTimer?.cancel();
-    if (_activeBooking != null) {
-      await FirebaseService.instance.updateBookingStatus(
-        _activeBooking!.id,
-        BookingStatus.cancelled,
-      );
+  /// Writes the final status first; only if that succeeds is tracking
+  /// stopped, so a failed write can't leave the hospital alarm stuck on an
+  /// ambulance the driver believes is finished. Returns whether it worked.
+  Future<bool> _finishBooking(BookingStatus status) async {
+    final booking = _activeBooking;
+    if (booking != null) {
+      try {
+        await FirebaseService.instance.updateBookingStatus(booking.id, status);
+      } catch (e) {
+        debugPrint('Booking status update failed: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Could not update the dispatch — check your connection and try again.'),
+            ),
+          );
+        }
+        return false;
+      }
     }
+    _stopLocationTracking();
+    return true;
+  }
+
+  void _resetToIdle() {
     setState(() {
       _appState = _AmbulanceState.idle;
       _activeBooking = null;
@@ -284,21 +354,18 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
     });
   }
 
+  Future<void> _cancelBooking() async {
+    if (!await _finishBooking(BookingStatus.cancelled)) return;
+    if (mounted) _resetToIdle();
+  }
+
   // ─────────────────────────────────────────────
   //  MARK AS ARRIVED
   // ─────────────────────────────────────────────
 
   Future<void> _markArrived() async {
-    _locationTimer?.cancel();
-    if (_activeBooking != null) {
-      await FirebaseService.instance.updateBookingStatus(
-        _activeBooking!.id,
-        BookingStatus.arrived,
-      );
-    }
-    if (mounted) {
-      _showArrivalDialog();
-    }
+    if (!await _finishBooking(BookingStatus.arrived)) return;
+    if (mounted) _showArrivalDialog();
   }
 
   void _showArrivalDialog() {
@@ -330,13 +397,7 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
               child: ElevatedButton(
                 onPressed: () {
                   Navigator.of(context).pop();
-                  setState(() {
-                    _appState = _AmbulanceState.idle;
-                    _activeBooking = null;
-                    _routingResult = null;
-                    _routePolyline = [];
-                    _statusMessage = 'Ready to dispatch';
-                  });
+                  _resetToIdle();
                 },
                 child: const Text('New Mission'),
               ),
@@ -380,8 +441,8 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
             initialZoom: 14,
           )
         else
-          CustomMap(
-            initialCenter: const LatLng(23.8103, 90.4125),
+          const CustomMap(
+            initialCenter: LatLng(23.8103, 90.4125),
             initialZoom: 12,
           ),
 
@@ -392,8 +453,8 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
               colors: [
-                AppColors.background.withOpacity(0.35),
-                AppColors.background.withOpacity(0.9),
+                AppColors.background.withValues(alpha: 0.35),
+                AppColors.background.withValues(alpha: 0.9),
               ],
             ),
           ),
@@ -600,7 +661,7 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
                   Text(
                     'Find optimal ICU',
                     style: GoogleFonts.inter(
-                      color: Colors.white.withOpacity(0.8),
+                      color: Colors.white.withValues(alpha: 0.8),
                       fontSize: 11,
                       fontWeight: FontWeight.w500,
                     ),
@@ -663,7 +724,7 @@ class _AmbulanceScreenState extends State<AmbulanceScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(AppSpacing.md),
       decoration: BoxDecoration(
-        color: AppColors.surface.withOpacity(0.96),
+        color: AppColors.surface.withValues(alpha: 0.96),
         borderRadius: BorderRadius.circular(AppRadius.md),
         border: Border.all(color: AppColors.border),
         boxShadow: AppShadow.card,

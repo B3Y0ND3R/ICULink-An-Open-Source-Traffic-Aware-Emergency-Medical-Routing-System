@@ -1,4 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/user_profile_model.dart';
 import '../utils/stream_extensions.dart';
@@ -80,7 +82,25 @@ class AuthService {
   //  SESSION
   // ─────────────────────────────────────────────
 
-  Future<void> signOut() => _auth.signOut();
+  /// Signs out, first detaching this device's FCM token from the user's
+  /// profile so the next person to sign in on this device doesn't receive
+  /// (and the previous user doesn't lose track of) the wrong alerts.
+  Future<void> signOut() async {
+    final uid = currentUser?.uid;
+    if (uid != null && !kIsWeb) {
+      try {
+        final token = await FirebaseMessaging.instance.getToken();
+        if (token != null) {
+          await _db.collection('users').doc(uid).update({
+            'fcm_tokens': FieldValue.arrayRemove([token]),
+          });
+        }
+      } catch (e) {
+        debugPrint('signOut: could not remove FCM token: $e');
+      }
+    }
+    await _auth.signOut();
+  }
 
   // ─────────────────────────────────────────────
   //  PROFILE (users/{uid})
@@ -122,7 +142,7 @@ class AuthService {
       phone: user.phoneNumber,
       createdAt: DateTime.now(),
     );
-    await _db.collection('users').doc(user.uid).set(profile.toFirestore());
+    await _createProfileIfAbsent(user.uid, profile);
   }
 
   Future<void> createStaffProfile({required String name}) async {
@@ -136,6 +156,19 @@ class AuthService {
       phone: user.phoneNumber,
       createdAt: DateTime.now(),
     );
-    await _db.collection('users').doc(user.uid).set(profile.toFirestore());
+    await _createProfileIfAbsent(user.uid, profile);
+  }
+
+  /// Registration is one-time: if a profile already exists (e.g. a transient
+  /// read error bounced an existing user back to role selection), keep it
+  /// instead of overwriting their role, FCM tokens, etc.
+  Future<void> _createProfileIfAbsent(
+    String uid,
+    UserProfileModel profile,
+  ) async {
+    final ref = _db.collection('users').doc(uid);
+    final existing = await ref.get();
+    if (existing.exists) return;
+    await ref.set(profile.toFirestore());
   }
 }

@@ -100,8 +100,20 @@ class _HospitalFormScreenState extends State<HospitalFormScreen> {
       setState(() => _errorText = 'Enter a hospital name.');
       return;
     }
+    if (name.length > 120) {
+      setState(() => _errorText = 'Hospital name is too long (max 120 characters).');
+      return;
+    }
+    if (contact.length > 40) {
+      setState(() => _errorText = 'Contact number is too long (max 40 characters).');
+      return;
+    }
     if (lat == null || lng == null) {
       setState(() => _errorText = 'Set a location — tap "Use my current location" or enter coordinates.');
+      return;
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      setState(() => _errorText = 'Coordinates out of range (latitude ±90, longitude ±180).');
       return;
     }
 
@@ -122,9 +134,14 @@ class _HospitalFormScreenState extends State<HospitalFormScreen> {
       } else {
         final icuBeds = int.tryParse(_icuBedsController.text.trim());
         final ventilators = int.tryParse(_ventilatorsController.text.trim());
-        if (icuBeds == null || ventilators == null || icuBeds < 0 || ventilators < 0) {
+        if (icuBeds == null ||
+            ventilators == null ||
+            icuBeds < 0 ||
+            ventilators < 0 ||
+            icuBeds > 999 ||
+            ventilators > 999) {
           setState(() {
-            _errorText = 'ICU beds and ventilators must be non-negative numbers.';
+            _errorText = 'ICU beds and ventilators must be whole numbers from 0 to 999.';
             _isSubmitting = false;
           });
           return;

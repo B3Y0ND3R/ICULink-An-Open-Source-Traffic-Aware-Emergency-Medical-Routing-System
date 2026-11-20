@@ -1,5 +1,6 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/auth_gate.dart';
@@ -20,7 +21,7 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Lock to portrait on phones; allow landscape on tablets/web
+  // Portrait plus both landscape orientations (tablets / web ER panel)
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.landscapeLeft,
@@ -35,22 +36,36 @@ Future<void> main() async {
 
   // ── Initialize Firebase
   //
-  // NOTE: hospital seeding is intentionally NOT triggered here anymore.
-  // FirebaseService.seedInitialHospitals() ran unauthenticated at every app
-  // launch, which is incompatible with firestore.rules once deployed
-  // (reads require an authenticated user, and hospital document creation is
-  // denied entirely from the client by design — see firestore.rules). It's
-  // now a one-time manual/admin operation: call it once yourself (e.g. from
-  // a debug console or a short-lived script) before rules are enforced, or
-  // add hospital documents directly via the Firebase Console.
+  // Hospitals are created in-app by staff (Add Hospital) or directly in the
+  // Firebase Console; there is no client-side seeding, because firestore.rules
+  // only lets a signed-in user create a hospital that lists themselves as
+  // its owner.
+  var firebaseReady = false;
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
-    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-    await NotificationService.instance.initialize();
+    firebaseReady = true;
   } catch (e) {
     debugPrint('Firebase init failed: $e');
+  }
+
+  if (!firebaseReady) {
+    // Every screen needs Firebase Auth/Firestore — show a clear message
+    // instead of crashing into a red error screen.
+    runApp(const _StartupErrorApp());
+    return;
+  }
+
+  // Push notifications are best-effort; the app is fully usable without.
+  try {
+    if (!kIsWeb) {
+      FirebaseMessaging.onBackgroundMessage(
+          _firebaseMessagingBackgroundHandler);
+    }
+    await NotificationService.instance.initialize();
+  } catch (e) {
+    debugPrint('Notification setup failed: $e');
   }
 
   runApp(const ICULinkApp());
@@ -66,6 +81,30 @@ class ICULinkApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(),
       home: const AuthGate(),
+    );
+  }
+}
+
+class _StartupErrorApp extends StatelessWidget {
+  const _StartupErrorApp();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: buildAppTheme(),
+      home: const Scaffold(
+        body: Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              'ICULink could not connect to its backend. '
+              'Check your internet connection and restart the app.',
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -29,7 +29,8 @@ class CustomMap extends StatefulWidget {
   /// on the hospital ER panel).
   final List<BookingModel> activeBookings;
 
-  /// Polyline route points [lat, lng] pairs from Mapbox or fallback.
+  /// Polyline route points as [lat, lng] pairs (OpenRouteService geometry,
+  /// or a straight line if that service is unavailable).
   final List<List<double>> routePolyline;
 
   /// Initial zoom level.
@@ -75,7 +76,16 @@ class _CustomMapState extends State<CustomMap> {
     super.initState();
     _mapController = MapController();
     _mapEventSub = _mapController.mapEventStream.listen((event) {
-      if (event.source != MapEventSource.mapController && _followMode) {
+      // Only genuine user gestures end follow mode. Programmatic moves and
+      // the size-change event flutter_map emits after the first layout (and
+      // on every resize) must not — otherwise follow mode would switch off
+      // as soon as the map first appears.
+      final isUserGesture = event.source != MapEventSource.mapController &&
+          event.source != MapEventSource.nonRotatedSizeChange &&
+          event.source != MapEventSource.fitCamera &&
+          event.source != MapEventSource.interactiveFlagsChanged &&
+          event.source != MapEventSource.custom;
+      if (isUserGesture && _followMode) {
         setState(() => _followMode = false);
       }
     });
@@ -161,7 +171,7 @@ class _CustomMapState extends State<CustomMap> {
     }).toList();
   }
 
-  Marker? _buildAmbulanceMarker(LatLng position, {String? label}) {
+  Marker _buildAmbulanceMarker(LatLng position, {String? label}) {
     return Marker(
       point: position,
       width: 88,
@@ -236,7 +246,7 @@ class _CustomMapState extends State<CustomMap> {
       Polyline(
         points: points,
         strokeWidth: 7,
-        color: Colors.black.withOpacity(0.35),
+        color: Colors.black.withValues(alpha: 0.35),
       ),
       // Main route polyline
       Polyline(
@@ -250,7 +260,7 @@ class _CustomMapState extends State<CustomMap> {
       Polyline(
         points: points,
         strokeWidth: 1.5,
-        color: Colors.white.withOpacity(0.5),
+        color: Colors.white.withValues(alpha: 0.5),
         pattern: StrokePattern.dashed(segments: const [10, 8]),
       ),
     ];
@@ -265,19 +275,19 @@ class _CustomMapState extends State<CustomMap> {
       markers.addAll(_buildHospitalMarkers());
     }
 
-    // Ambulance position on the map
-    if (widget.ambulancePosition != null) {
-      final m = _buildAmbulanceMarker(widget.ambulancePosition!);
-      if (m != null) markers.add(m);
+    // Ambulance position on the map. When activeBookings are supplied (ER
+    // panel) each one already gets its own labelled marker, so the focus
+    // position must not be drawn a second time on top of it.
+    if (widget.ambulancePosition != null && widget.activeBookings.isEmpty) {
+      markers.add(_buildAmbulanceMarker(widget.ambulancePosition!));
     }
 
     // Active bookings (for hospital ER view showing incoming ambulances)
     for (final booking in widget.activeBookings) {
-      final m = _buildAmbulanceMarker(
+      markers.add(_buildAmbulanceMarker(
         LatLng(booking.currentLat, booking.currentLng),
         label: booking.ambulanceId,
-      );
-      if (m != null) markers.add(m);
+      ));
     }
 
     // Destination marker
@@ -300,7 +310,7 @@ class _CustomMapState extends State<CustomMap> {
             // ─ Base tile layer (OSM – completely free)
             TileLayer(
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-              userAgentPackageName: 'com.iculink.app',
+              userAgentPackageName: 'com.example.joldibed',
               tileBuilder: _darkModeTileBuilder,
               maxZoom: 19,
             ),

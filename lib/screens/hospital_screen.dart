@@ -55,7 +55,7 @@ class _HospitalScreenState extends State<HospitalScreen>
     _flashController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 400),
-    )..repeat(reverse: true);
+    );
     _flashAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_flashController);
 
     // Register this device's FCM token so the Cloud Function that pushes
@@ -63,10 +63,10 @@ class _HospitalScreenState extends State<HospitalScreen>
     // to call every time this screen is entered — arrayUnion is idempotent.
     NotificationService.instance.registerTokenForCurrentUser();
 
-    _hospitalSub = FirebaseService.instance.streamAllHospitals().listen((list) {
+    final myUid = AuthService.instance.currentUser?.uid ?? '';
+    _hospitalSub =
+        FirebaseService.instance.streamHospitalsForOwner(myUid).listen((mine) {
       if (!mounted) return;
-      final myUid = AuthService.instance.currentUser?.uid;
-      final mine = list.where((h) => h.ownerUids.contains(myUid));
       final myHospitals = mine.where((h) => !h.archived).toList();
       final myArchived = mine.where((h) => h.archived).toList();
       setState(() {
@@ -84,9 +84,7 @@ class _HospitalScreenState extends State<HospitalScreen>
             // Archived (or otherwise removed) from under the current view —
             // fall back to the selector rather than showing a stale/ghost
             // dashboard.
-            _bookingSub?.cancel();
-            _stopAlarm();
-            _selectedHospital = null;
+            _leaveDashboard();
           }
         }
       });
@@ -107,6 +105,8 @@ class _HospitalScreenState extends State<HospitalScreen>
       if (!mounted) return;
       final hadAlarm = _alarmActive;
       final hasBookings = bookings.isNotEmpty;
+      final knownIds = _activeBookings.map((b) => b.id).toSet();
+      final hasNewArrival = bookings.any((b) => !knownIds.contains(b.id));
       setState(() {
         _activeBookings = bookings;
         _alarmActive = hasBookings;
@@ -117,7 +117,9 @@ class _HospitalScreenState extends State<HospitalScreen>
             : bookings.where((b) => b.id == _selectedBooking!.id).firstOrNull;
         _selectedBooking = stillActive ?? (hasBookings ? bookings.first : null);
       });
-      if (hasBookings && !hadAlarm) _triggerAlarm();
+      // Alert for the first ambulance AND for any further one that arrives
+      // later — even if the staff muted the previous alarm.
+      if (hasBookings && (!hadAlarm || hasNewArrival)) _triggerAlarm();
       if (!hasBookings && hadAlarm) _stopAlarm();
     });
   }
@@ -126,15 +128,35 @@ class _HospitalScreenState extends State<HospitalScreen>
     _flashController.repeat(reverse: true);
     try {
       await _audioPlayer.setReleaseMode(ReleaseMode.loop);
-      await _audioPlayer.play(AssetSource('audio/alarm.mp3'));
-    } catch (_) {
-      // Audio may not be available in all environments
+      await _audioPlayer.play(AssetSource('audio/alarm.wav'));
+    } catch (e) {
+      // Audio may not be available in all environments; the visual alarm
+      // and push notification still work.
+      debugPrint('Alarm audio failed: $e');
     }
   }
 
   Future<void> _stopAlarm() async {
-    _flashController.stop();
-    await _audioPlayer.stop();
+    _flashController
+      ..stop()
+      ..value = 0;
+    try {
+      await _audioPlayer.stop();
+    } catch (e) {
+      debugPrint('Alarm stop failed: $e');
+    }
+  }
+
+  /// Returns to the hospital selector and clears every piece of per-hospital
+  /// alert state, so no stale alarm overlay survives the navigation.
+  void _leaveDashboard() {
+    _bookingSub?.cancel();
+    _bookingSub = null;
+    _stopAlarm();
+    _selectedHospital = null;
+    _activeBookings = [];
+    _selectedBooking = null;
+    _alarmActive = false;
   }
 
   Future<void> _updateField(String field, int delta) async {
@@ -417,9 +439,7 @@ class _HospitalScreenState extends State<HospitalScreen>
     try {
       await FirebaseService.instance.setHospitalArchived(h.id, true);
       if (!mounted) return;
-      _bookingSub?.cancel();
-      _stopAlarm();
-      setState(() => _selectedHospital = null);
+      setState(_leaveDashboard);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -454,11 +474,7 @@ class _HospitalScreenState extends State<HospitalScreen>
           Row(
             children: [
               IconButton(
-                onPressed: () {
-                  _bookingSub?.cancel();
-                  _stopAlarm();
-                  setState(() => _selectedHospital = null);
-                },
+                onPressed: () => setState(_leaveDashboard),
                 icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
               ),
               const SizedBox(width: AppSpacing.xs),
@@ -661,88 +677,96 @@ class _HospitalScreenState extends State<HospitalScreen>
   // ─────────────────────────────────────────────
 
   Widget _buildAlarmOverlay() {
-    return AnimatedBuilder(
-      animation: _flashAnimation,
-      builder: (_, __) {
-        return IgnorePointer(
-          ignoring: false,
-          child: GestureDetector(
-            onTap: () {}, // absorb taps on overlay edges
-            child: Container(
-              color: Color.lerp(
-                AppColors.alarm.withOpacity(0.0),
-                AppColors.alarm.withOpacity(0.14),
-                _flashAnimation.value,
-              ),
-              child: SafeArea(
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  child: Container(
-                    margin: const EdgeInsets.all(AppSpacing.md),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.md,
-                      vertical: AppSpacing.md,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppColors.alarm,
-                      borderRadius: BorderRadius.circular(AppRadius.md),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.emergency_share_rounded, color: Colors.white, size: 28)
-                            .animate(onPlay: (c) => c.repeat(reverse: true))
-                            .scaleXY(end: 1.15, duration: 500.ms),
-                        const SizedBox(width: AppSpacing.md),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                'Incoming emergency',
-                                style: GoogleFonts.inter(
-                                  color: Colors.white,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              Text(
-                                '${_activeBookings.length} ambulance(s) en route · prepare ICU',
-                                style: GoogleFonts.inter(color: Colors.white.withOpacity(0.85), fontSize: 13),
-                              ),
-                            ],
-                          ),
-                        ),
-                        GestureDetector(
-                          onTap: _stopAlarm,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: AppSpacing.sm + 2,
-                              vertical: AppSpacing.xs + 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.18),
-                              borderRadius: BorderRadius.circular(AppRadius.sm),
-                            ),
-                            child: Text(
-                              'Mute',
-                              style: GoogleFonts.inter(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+    // Positioned.fill + a Stack of (pointer-transparent tint) and (banner):
+    // only the banner itself takes touches, so the dashboard underneath —
+    // bed counts, booking list, map — stays fully usable during an alert.
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: IgnorePointer(
+              child: AnimatedBuilder(
+                animation: _flashAnimation,
+                builder: (_, __) => ColoredBox(
+                  color: Color.lerp(
+                    AppColors.alarm.withValues(alpha: 0.0),
+                    AppColors.alarm.withValues(alpha: 0.14),
+                    _flashAnimation.value,
+                  )!,
                 ),
               ),
             ),
           ),
-        );
-      },
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: Container(
+                margin: const EdgeInsets.all(AppSpacing.md),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.md,
+                  vertical: AppSpacing.md,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.alarm,
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.emergency_share_rounded, color: Colors.white, size: 28)
+                        .animate(onPlay: (c) => c.repeat(reverse: true))
+                        .scaleXY(end: 1.15, duration: 500.ms),
+                    const SizedBox(width: AppSpacing.md),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Incoming emergency',
+                            style: GoogleFonts.inter(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          Text(
+                            '${_activeBookings.length} ambulance(s) en route · prepare ICU',
+                            style: GoogleFonts.inter(
+                              color: Colors.white.withValues(alpha: 0.85),
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: _stopAlarm,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.sm + 2,
+                          vertical: AppSpacing.xs + 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(AppRadius.sm),
+                        ),
+                        child: Text(
+                          'Mute',
+                          style: GoogleFonts.inter(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -840,7 +864,7 @@ class _ArchivedHospitalTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(AppSpacing.md),
       decoration: BoxDecoration(
-        color: AppColors.surface.withOpacity(0.5),
+        color: AppColors.surface.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(AppRadius.md),
         border: Border.all(color: AppColors.border),
       ),

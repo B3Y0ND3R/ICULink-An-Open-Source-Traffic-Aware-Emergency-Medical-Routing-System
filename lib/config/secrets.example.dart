@@ -3,6 +3,9 @@
 class Secrets {
   Secrets._();
 
+  /// Get a free key at https://developer.tomtom.com/
+  static const tomtomApiKey = 'YOUR_TOMTOM_API_KEY_HERE';
+
   /// Get a free key at https://openrouteservice.org/dev/#/signup
   static const orsApiKey = 'YOUR_OPENROUTESERVICE_API_KEY_HERE';
 }
